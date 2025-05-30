@@ -1,22 +1,367 @@
-{
-  "name": "dawn-autoreff",
-  "version": "1.0.0",
-  "main": "src/index.js",
-  "type": "commonjs",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "axios": "^1.7.9",
-    "chalk": "^4.1.2",
-    "fs": "^0.0.1-security",
-    "https-proxy-agent": "^7.0.6",
-    "node-cron": "^3.0.3",
-    "qs": "^6.14.0",
-    "socks-proxy-agent": "^8.0.5"
-  }
+import dotenv from 'dotenv';
+import { JsonRpcProvider, ethers } from 'ethers';
+import kleur from 'kleur';
+import fs from 'fs';
+import moment from 'moment-timezone';
+import fetch from 'node-fetch';
+import chalk from 'chalk';
+import readline from 'readline';
+
+dotenv.config();
+
+// RPC Providers
+const rpcProviders = [  
+  new JsonRpcProvider('https://testnet.saharalabs.ai'), 
+];
+
+let currentRpcProviderIndex = 0;
+
+function provider() {  
+  return rpcProviders[currentRpcProviderIndex];  
 }
+
+function rotateRpcProvider() {  
+  currentRpcProviderIndex = (currentRpcProviderIndex + 1) % rpcProviders.length;  
+  return provider(); 
+}
+
+// Explorer base URL
+const baseExplorerUrl = 'https://testnet-explorer.saharalabs.ai';
+
+// Explorer URLs
+const explorer = {
+  get tx() {
+    return (txHash) => `${baseExplorerUrl}/tx/${txHash}`;
+  },
+  get address() {
+    return (address) => `${baseExplorerUrl}/address/${address}`;
+  }
+};
+
+// Log helper
+function appendLog(message) {
+  fs.appendFileSync('log-sahara.txt', message + '\n');
+}
+
+// Function to generate random transaction value
+function getRandomTransactionValue() {
+  const min = 0.000001;  // Minimum value for transaction
+  const max = 0.00001;   // Maximum value for transaction
+  return Math.random() * (max - min) + min;
+}
+
+// Function to generate a random Ethereum address
+function generateRandomAddress() {
+  const randomPrivateKey = ethers.Wallet.createRandom().privateKey;
+  const wallet = new ethers.Wallet(randomPrivateKey);
+  return wallet.address;
+}
+
+// Function to add delay between transactions
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Function to read private keys
+function readPrivateKeys() {
+    try {
+        const content = fs.readFileSync('privatekeys.txt', 'utf-8');
+        const lines = content.split('\n');
+        const keys = [];
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            
+            // Skip empty lines and comments
+            if (!line || line.startsWith('#')) continue;
+            
+            // Remove '0x' prefix if present
+            const key = line.startsWith('0x') ? line.slice(2) : line;
+            
+            // Validate private key format
+            if (key.length !== 64 || !/^[0-9a-fA-F]+$/.test(key)) {
+                console.log(chalk.red(`❌ Invalid private key format at line ${i + 1}:`));
+                console.log(chalk.yellow(`Expected: 64 hexadecimal characters`));
+                console.log(chalk.yellow(`Got: ${key.length} characters`));
+                continue;
+            }
+            
+            keys.push(key);
+        }
+        
+        if (keys.length === 0) {
+            console.log(chalk.red("❌ No valid private keys found in privatekeys.txt"));
+            console.log(chalk.yellow("\nPlease ensure your privatekeys.txt file:"));
+            console.log(chalk.yellow("1. Contains one private key per line"));
+            console.log(chalk.yellow("2. Each key is 64 hexadecimal characters"));
+            console.log(chalk.yellow("3. No '0x' prefix needed"));
+            process.exit(1);
+        }
+        
+        console.log(chalk.green(`✅ Successfully loaded ${keys.length} valid private keys`));
+        return keys;
+    } catch (error) {
+        console.log(chalk.red("❌ Error reading privatekeys.txt:"));
+        console.log(chalk.yellow("Please ensure the file exists and is readable"));
+        process.exit(1);
+    }
+}
+
+// Function to process a single wallet
+async function processWallet(wallet) {
+    try {
+        console.log(chalk.blue(`🚀 Processing Wallet: ${wallet.address}`));
+        
+        // Check balance
+        const balance = await provider().getBalance(wallet.address);
+        const balanceInEth = ethers.formatEther(balance);
+        console.log(chalk.yellow(`Current Balance: ${balanceInEth} ETH`));
+        
+        // Generate random transaction value between 0.00001 and 0.00005
+        const minValue = 0.00001;
+        const maxValue = 0.00005;
+        const randomValue = (Math.random() * (maxValue - minValue) + minValue).toFixed(8);
+        const txValue = ethers.parseEther(randomValue.toString());
+        
+        // Create transaction with reasonable gas prices
+        const tx = {
+            to: "0x310f9f43998e8a71a75ec180ac2ffa2be204af91",
+            value: txValue,
+            data: "0x",
+            gasLimit: 21000,
+            maxFeePerGas: ethers.parseUnits("100", "gwei"),  // 100 gwei
+            maxPriorityFeePerGas: ethers.parseUnits("20", "gwei"),  // 20 gwei
+            type: 2
+        };
+
+        // Calculate total cost
+        const maxGasCost = tx.maxFeePerGas * BigInt(tx.gasLimit);
+        const totalCost = tx.value + maxGasCost;
+        
+        // Check if we have enough balance
+        if (balance < totalCost) {
+            console.log(chalk.red(`❌ Insufficient balance. Need ${ethers.formatEther(totalCost)} ETH`));
+            console.log(chalk.yellow(`Transaction Value: ${randomValue} ETH`));
+            console.log(chalk.yellow(`Gas Cost: ${ethers.formatEther(maxGasCost)} ETH`));
+            return false;
+        }
+
+        console.log(chalk.yellow(`Transaction Value: ${randomValue} ETH`));
+        console.log(chalk.yellow(`Gas Price - Max Fee: ${ethers.formatUnits(tx.maxFeePerGas, "gwei")} gwei, Priority Fee: ${ethers.formatUnits(tx.maxPriorityFeePerGas, "gwei")} gwei`));
+
+        // Send transaction
+        const transaction = await wallet.sendTransaction(tx);
+        console.log(chalk.green(`✅ Transaction sent! Hash: ${transaction.hash}`));
+        
+        // Wait for confirmation
+        const receipt = await transaction.wait();
+        console.log(chalk.green(`✅ Transaction confirmed!`));
+        
+        return true;
+    } catch (error) {
+        if (error.message.includes('insufficient funds')) {
+            console.log(chalk.magenta(`❌ Insufficient funds for ${wallet.address}`));
+            try {
+                const balance = await provider().getBalance(wallet.address);
+                const balanceInEth = ethers.formatEther(balance);
+                console.log(chalk.yellow(`Balance: ${balanceInEth} ETH`));
+            } catch (balanceError) {
+                console.log(chalk.red(`❌ Error getting balance: ${balanceError.message}`));
+            }
+        } else if (error.message.includes('insufficient fee')) {
+            console.log(chalk.red("❌ Gas price too low, retrying with higher gas..."));
+            try {
+                // Retry with higher gas prices
+                const retryTx = {
+                    ...tx,
+                    maxFeePerGas: ethers.parseUnits("200", "gwei"),  // 200 gwei
+                    maxPriorityFeePerGas: ethers.parseUnits("50", "gwei"),  // 50 gwei
+                };
+                
+                const transaction = await wallet.sendTransaction(retryTx);
+                console.log(chalk.green(`✅ Retry transaction sent! Hash: ${transaction.hash}`));
+                
+                const receipt = await transaction.wait();
+                console.log(chalk.green(`✅ Retry transaction confirmed!`));
+                
+                return true;
+            } catch (retryError) {
+                console.log(chalk.red(`❌ Retry failed: ${retryError.message}`));
+            }
+        } else {
+            console.log(chalk.red(`❌ Error: ${error.message}`));
+        }
+        return false;
+    }
+}
+
+// Function to complete tasks
+async function completeTasks(wallet) {
+    try {
+        console.log(chalk.blue(`\n🎯 Completing tasks for wallet: ${wallet.address}`));
+        
+        // Task 1: Daily Login
+        console.log(chalk.yellow('📝 Completing Daily Login task...'));
+        try {
+            const response = await fetch('https://testnet.saharalabs.ai/api/v1/daily-login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${wallet.address}`
+                }
+            });
+            
+            if (response.ok) {
+                console.log(chalk.green('✅ Daily Login task completed!'));
+            } else {
+                console.log(chalk.red('❌ Daily Login task failed'));
+            }
+        } catch (error) {
+            console.log(chalk.red(`❌ Error in Daily Login: ${error.message}`));
+        }
+        
+        // Add delay between tasks
+        await delay(2000);
+        
+        // Task 2: Shard Claim
+        console.log(chalk.yellow('📝 Completing Shard Claim task...'));
+        try {
+            const response = await fetch('https://testnet.saharalabs.ai/api/v1/shard-claim', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${wallet.address}`
+                }
+            });
+            
+            if (response.ok) {
+                console.log(chalk.green('✅ Shard Claim task completed!'));
+            } else {
+                console.log(chalk.red('❌ Shard Claim task failed'));
+            }
+        } catch (error) {
+            console.log(chalk.red(`❌ Error in Shard Claim: ${error.message}`));
+        }
+        
+        return true;
+    } catch (error) {
+        console.log(chalk.red(`❌ Error completing tasks: ${error.message}`));
+        return false;
+    }
+}
+
+// Main function
+async function main(isSingleTransaction = false, wallet = null) {
+    try {
+        if (isSingleTransaction) {
+            if (wallet) {
+                // Use the provided wallet
+                const txSuccess = await processWallet(wallet);
+                if (txSuccess) {
+                    // Complete tasks after successful transaction
+                    await completeTasks(wallet);
+                }
+                return txSuccess;
+            } else {
+                // Get the first private key for single transaction
+                const privateKeys = readPrivateKeys();
+                if (privateKeys.length === 0) return false;
+                
+                const wallet = new ethers.Wallet(privateKeys[0], provider());
+                const txSuccess = await processWallet(wallet);
+                if (txSuccess) {
+                    // Complete tasks after successful transaction
+                    await completeTasks(wallet);
+                }
+                return txSuccess;
+            }
+        } else {
+            // Show menu for multiple transactions
+            console.log(chalk.cyan('\n=== MENU OPTIONS ==='));
+            console.log('1. Daily Login');
+            console.log('2. Shard Claim');
+            console.log('3. Balance');
+            console.log('4. Auto All');
+            console.log('5. Exit');
+            
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+
+            rl.question('\n? Select an option: ', async (answer) => {
+                rl.close();
+                
+                switch(answer) {
+                    case '1':
+                        console.log('Daily Login functionality to be implemented');
+                        await waitForEnter();
+                        break;
+                    case '2':
+                        console.log('Shard Claim functionality to be implemented');
+                        await waitForEnter();
+                        break;
+                    case '3':
+                        console.log('Balance functionality to be implemented');
+                        await waitForEnter();
+                        break;
+                    case '4':
+                        // Read private keys
+                        const privateKeys = readPrivateKeys();
+                        console.log(chalk.cyan(`🌍 Processing ${privateKeys.length} wallets...`));
+
+                        // Process each wallet
+                        for (let i = 0; i < privateKeys.length; i++) {
+                            console.log(chalk.yellow(`\nProcessing wallet ${i + 1} of ${privateKeys.length}`));
+                            const wallet = new ethers.Wallet(privateKeys[i], provider());
+                            const txSuccess = await processWallet(wallet);
+                            
+                            if (txSuccess) {
+                                // Complete tasks after successful transaction
+                                await completeTasks(wallet);
+                            } else {
+                                console.log(chalk.red(`❌ Transaction failed for wallet ${i + 1}`));
+                            }
+                            
+                            // Add delay between wallets
+                            if (i < privateKeys.length - 1) {
+                                await delay(5000);
+                            }
+                        }
+
+                        console.log(chalk.green("\n🎉 All processes completed."));
+                        await waitForEnter();
+                        break;
+                    case '5':
+                        console.log(chalk.yellow('👋 Goodbye!'));
+                        process.exit(0);
+                        break;
+                    default:
+                        console.log(chalk.red('❌ Invalid option selected'));
+                        await waitForEnter();
+                        break;
+                }
+            });
+        }
+    } catch (error) {
+        console.error(chalk.red("❌ Error in main process:"), error);
+        return false;
+    }
+}
+
+// Function to wait for Enter key
+function waitForEnter() {
+    return new Promise((resolve) => {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+        rl.question('\nPress Enter to return to main menu...', () => {
+            rl.close();
+            resolve();
+        });
+    });
+}
+
+export default main; 
